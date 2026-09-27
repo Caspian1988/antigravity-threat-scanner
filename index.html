@@ -313,6 +313,42 @@
       return [...new Set(cleaned)]; // Deduplicate
     }
 
+    function evaluateDomainRisk(host) {
+      host = host.toLowerCase();
+      let score = 0;
+      let flags = [];
+
+      if (/\.(shop|xyz|top|online|click|cfd|gq|tk|ml|ga|work|rest|icu|site)$/i.test(host)) {
+        score += 40;
+        flags.push('Disposable/Abused TLD');
+      }
+
+      const brandRegex = /(aldi|amazon|paypal|apple|ikea|chase|binance|wells|netflix|microsoft|bankofamerica|target)/i;
+      if (brandRegex.test(host) && !host.endsWith('.com') && !host.endsWith('.org')) {
+        score += 45;
+        flags.push('Brand Spoofing');
+      }
+
+      const keywordRegex = /(login|verify|security|alert|update|wallet|claim|clearance)/i;
+      if (keywordRegex.test(host) && !host.endsWith('.com')) {
+        score += 20;
+        flags.push('Phishing Keyword');
+      }
+
+      if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) {
+        score += 60;
+        flags.push('Raw IP Host');
+      }
+
+      score = Math.min(score, 100);
+
+      let classification = 'CLEAN';
+      if (score >= 50) classification = 'HIGH RISK';
+      else if (score > 0) classification = 'SUSPICIOUS';
+
+      return { score, classification, flags };
+    }
+
     async function checkGoogleSafeBrowsing(urls, apiKey) {
       if (!apiKey) return null;
       const endpoint = `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${apiKey}`;
@@ -374,39 +410,10 @@
           host = rawUrl.toLowerCase();
         }
 
-        let riskScore = 0;
-        let flags = [];
-        const parts = host.split('.');
-        const tld = '.' + parts[parts.length - 1];
-
-        // Check 1: Risky TLD
-        const riskyTLDs = ['.shop', '.top', '.xyz', '.site', '.click', '.online', '.vip', '.work', '.info'];
-        if (riskyTLDs.includes(tld)) {
-          riskScore += 40;
-          flags.push(`Disposable TLD (${tld})`);
-        }
-
-        // Check 2: Subdomain Brand Spoofing
-        const brands = ['aldi', 'amazon', 'target', 'walmart', 'apple', 'paypal', 'ebay', 'costco', 'ikea'];
-        brands.forEach(b => {
-          if (host.includes(b) && !host.endsWith(b + '.com') && !host.endsWith(b + '.org')) {
-            riskScore += 45;
-            flags.push(`Brand spoofing (${b})`);
-          }
-        });
-
-        // Check 3: Hyphenation
-        const hyphens = (host.match(/-/g) || []).length;
-        if (hyphens >= 3) {
-          riskScore += 25;
-          flags.push(`High hyphen count (${hyphens})`);
-        }
-
-        // Check 4: IP Host
-        if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) {
-          riskScore += 60;
-          flags.push('Raw IP address host');
-        }
+        const domainRisk = evaluateDomainRisk(host);
+        let riskScore = domainRisk.score;
+        let classification = domainRisk.classification;
+        const flags = domainRisk.flags;
 
         // Safe Browsing API Match Check
         let apiStatus = 'Not Queried';
@@ -414,6 +421,7 @@
           const match = apiMatches.find(m => m.threat.url.includes(host));
           if (match) {
             riskScore = 100;
+            classification = 'HIGH RISK';
             apiStatus = `FLAGGED (${match.threatType})`;
             flags.push(`Google API Threat: ${match.threatType}`);
           } else {
@@ -424,7 +432,8 @@
         const resultObj = {
           rawUrl,
           host,
-          riskScore: Math.min(riskScore, 100),
+          riskScore,
+          classification,
           flags: flags.length > 0 ? flags : ['None'],
           apiStatus
         };
@@ -436,14 +445,13 @@
         tr.onclick = () => selectResult(index);
 
         let tagClass = 'tag-success';
-        let classification = 'CLEAN';
-        if (resultObj.riskScore >= 50) { tagClass = 'tag-danger'; classification = 'HIGH RISK'; }
-        else if (resultObj.riskScore > 0) { tagClass = 'tag-warning'; classification = 'SUSPICIOUS'; }
+        if (resultObj.classification === 'HIGH RISK') tagClass = 'tag-danger';
+        else if (resultObj.classification === 'SUSPICIOUS') tagClass = 'tag-warning';
 
         tr.innerHTML = `
           <td><code>${host}</code></td>
           <td><strong>${resultObj.riskScore}/100</strong></td>
-          <td><span class="tag ${tagClass}">${classification}</span></td>
+          <td><span class="tag ${tagClass}">${resultObj.classification}</span></td>
           <td><span class="tag ${apiStatus.includes('FLAGGED') ? 'tag-danger' : 'tag-success'}">${apiStatus}</span></td>
         `;
         tableBody.appendChild(tr);
